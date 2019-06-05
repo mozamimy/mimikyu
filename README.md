@@ -28,6 +28,10 @@ Mimikyu emulates the configuration endpoint. When Mimikyu receives a request fro
 
 As a result, the client of Mimikyu can discover all nodes included primary cluster and secondary cluster. Hence, we can decrease nodes of primary cluster gradually. 
 
+## Usage
+
+See `mimikyu --help`.
+
 ## License
 
 MIT
