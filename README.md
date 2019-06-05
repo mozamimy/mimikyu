@@ -17,10 +17,14 @@ Mimikyu emulates the configuration endpoint. When Mimikyu receives a request fro
 
 - If the sent command is `stats`
     - Execute same `stats` command to upstream primary cluster. Then, send the response to the client as it as.
+    - Respond with secondary stats when primary endpoint is down.
 - If the sent command is `config get cluster`
     - Execute `config get cluster` for upstream primary/secondary clusters and collect the responses.
     - Then, put the endpoint information together as a single response for the client.
 - If other commands is sent, Mimikyu just returns `SERVER_ERROR` and close the connection from client.
+- Also Mimikyu returns error when primary and secondary upstream is down or not exist.
+
+![](docs/how_it_works.png)
 
 As a result, the client of Mimikyu can discover all nodes included primary cluster and secondary cluster. Hence, we can decrease nodes of primary cluster gradually. 
 
