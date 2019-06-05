@@ -65,57 +65,42 @@ impl ServerInner {
         let client_stream = stream?;
         let (primary_ip_addr_opt, secondary_ip_addr_opt) =
             self.resolve_configuration_endpoints()?;
-        let primary_ip_addr = match primary_ip_addr_opt {
-            Some(i) => i,
+        let primary_upstream = match primary_ip_addr_opt {
+            Some(primary_ip_addr) => std::net::TcpStream::connect(format!(
+                "{}:{}",
+                primary_ip_addr, self.primary_endpoint.port,
+            ))
+            .ok(),
             None => {
-                return Err(failure::format_err!(
-                    "No A record for {}",
-                    self.primary_endpoint.host
-                ))
+                log::warn!("It seems no primary cluster endpoint");
+                None
             }
         };
-        let secondary_ip_addr = match secondary_ip_addr_opt {
-            Some(i) => i,
+        let secondary_upstream = match secondary_ip_addr_opt {
+            Some(secondary_ip_addr) => std::net::TcpStream::connect(format!(
+                "{}:{}",
+                secondary_ip_addr, self.secondary_endpoint.port,
+            ))
+            .ok(),
             None => {
-                return Err(failure::format_err!(
-                    "No A record for {}",
-                    self.secondary_endpoint.host
-                ))
+                log::warn!("It seems no secondary cluster endpoint");
+                None
             }
         };
-
-        let primary_upstream = std::net::TcpStream::connect(format!(
-            "{}:{}",
-            primary_ip_addr, self.primary_endpoint.port
-        ))?;
-        log::debug!(
-            "Established primary connection for {}({:?}):{}",
-            self.primary_endpoint.host,
-            primary_ip_addr,
-            self.primary_endpoint.port
-        );
-        let secondary_upstream = std::net::TcpStream::connect(format!(
-            "{}:{}",
-            secondary_ip_addr, self.secondary_endpoint.port
-        ))?;
-        log::debug!(
-            "Established secondary connection for {}({:?}):{}",
-            self.secondary_endpoint.host,
-            secondary_ip_addr,
-            self.secondary_endpoint.port
-        );
 
         let mut client_stream_reader = std::io::BufReader::new(&client_stream);
         let mut client_stream_writer = std::io::BufWriter::new(&client_stream);
         let mut client_stream_read_buffer = String::with_capacity(1 * 1024 * 1024);
 
-        let mut primary_upstream_reader = std::io::BufReader::new(&primary_upstream);
-        let mut primary_upstream_writer = std::io::BufWriter::new(&primary_upstream);
-        let mut primary_upstream_read_buffer = String::with_capacity(1 * 1024 * 1024);
+        if primary_upstream.is_none() && secondary_upstream.is_none() {
+            client_stream_writer
+                .write_all(b"SERVER_ERROR There is no available configuration endpoint.\r\n")?;
+            client_stream_writer.flush()?;
 
-        let mut secondary_upstream_reader = std::io::BufReader::new(&secondary_upstream);
-        let mut secondary_upstream_writer = std::io::BufWriter::new(&secondary_upstream);
-        let mut secondary_upstream_read_buffer = String::with_capacity(1 * 1024 * 1024);
+            return Err(failure::format_err!(
+                "There is no available configuration endpoint."
+            ));
+        }
 
         loop {
             let client_request_len =
@@ -127,90 +112,20 @@ impl ServerInner {
             log::debug!("{}", client_stream_read_buffer);
             if client_stream_read_buffer.starts_with("stats") {
                 log::debug!("Proxy stats command");
-                primary_upstream_writer.write_all(&client_stream_read_buffer.as_bytes())?;
-                primary_upstream_writer.flush()?;
-                loop {
-                    primary_upstream_reader.read_line(&mut primary_upstream_read_buffer)?;
-                    log::debug!("{}", primary_upstream_read_buffer);
-                    if primary_upstream_read_buffer.ends_with("END\r\n") {
-                        break;
-                    }
-                }
-                client_stream_writer.write_all(&primary_upstream_read_buffer.as_bytes())?;
-                client_stream_writer.flush()?;
+                self.handle_stats_command(
+                    &primary_upstream,
+                    &secondary_upstream,
+                    &client_stream_read_buffer,
+                    &mut client_stream_writer,
+                )?;
             } else if client_stream_read_buffer.starts_with("config get cluster") {
-                // Merge responses from upstreams like following example.secondary_upstream_read_buffer
-                //
-                // ```
-                // CONFIG cluster 0 156
-                // 1
-                // mozamimy-cluster-001.qenso7.0001.apne1.cache.amazonaws.com|10.18.5.229|11211 mozamimy-cluster-001.qenso7.0002.apne1.cache.amazonaws.com|10.18.27.74|11211
-                //
-                // END
-                // ```
                 log::debug!("Proxy config get cluster command");
-                primary_upstream_writer.write_all(&client_stream_read_buffer.as_bytes())?;
-                primary_upstream_writer.flush()?;
-
-                let mut modification_count = 0;
-                let mut clusters_line = String::with_capacity(512);
-                let mut current_line: u8 = 0;
-                loop {
-                    primary_upstream_reader.read_line(&mut primary_upstream_read_buffer)?;
-                    log::debug!("{}", primary_upstream_read_buffer);
-                    if primary_upstream_read_buffer.starts_with("END") {
-                        break;
-                    }
-                    match current_line {
-                        1 => {
-                            let m: u8 = primary_upstream_read_buffer.trim().parse()?;
-                            modification_count += m;
-                        }
-                        2 => {
-                            clusters_line.push_str(primary_upstream_read_buffer.trim());
-                        }
-                        _ => { /* do nothings */ }
-                    }
-                    current_line += 1;
-                    primary_upstream_read_buffer.clear();
-                }
-
-                secondary_upstream_writer.write_all(&client_stream_read_buffer.as_bytes())?;
-                secondary_upstream_writer.flush()?;
-                current_line = 0;
-
-                loop {
-                    secondary_upstream_reader.read_line(&mut secondary_upstream_read_buffer)?;
-                    log::debug!("{}", primary_upstream_read_buffer);
-                    if secondary_upstream_read_buffer.starts_with("END") {
-                        break;
-                    }
-                    match current_line {
-                        2 => {
-                            clusters_line.push_str(" ");
-                            clusters_line.push_str(secondary_upstream_read_buffer.trim());
-                        }
-                        _ => { /* do nothings */ }
-                    }
-                    current_line += 1;
-                    secondary_upstream_read_buffer.clear();
-                }
-
-                let mut client_response_body = String::with_capacity(1024);
-                client_response_body.push_str(&modification_count.to_string());
-                client_response_body.push_str("\r\n");
-                client_response_body.push_str(&clusters_line);
-                client_response_body.push_str("\r\n\r\n");
-                client_response_body.push_str("END\r\n");
-                let client_response_body_size = client_response_body.as_bytes().len();
-                let client_response = format!(
-                    "CONFIG cluster 0 {}\r\n{}",
-                    client_response_body_size, client_response_body
-                );
-                log::debug!("{}", client_response);
-
-                client_stream_writer.write_all(client_response.as_bytes())?;
-                client_stream_writer.flush()?;
+                self.handle_config_get_cluster_command(
+                    &primary_upstream,
+                    &secondary_upstream,
+                    &client_stream_read_buffer,
+                    &mut client_stream_writer,
+                )?;
             } else {
                 log::debug!("Unknown command.");
                 client_stream_writer.write_all(b"SERVER_ERROR mimikyu proxy supports only `config get cluser` and `stats` commands\r\n")?;
@@ -224,8 +139,6 @@ impl ServerInner {
 
             // Ensure clear all buffer strings for next client interuction.
             client_stream_read_buffer.clear();
-            primary_upstream_read_buffer.clear();
-            secondary_upstream_read_buffer.clear();
         }
 
         Ok(())
@@ -248,6 +161,156 @@ impl ServerInner {
             primary_response.iter().next(),
             secondary_response.iter().next(),
         ))
+    }
+
+    fn handle_stats_command(
+        &self,
+        primary_upstream: &Option<std::net::TcpStream>,
+        secondary_upstream: &Option<std::net::TcpStream>,
+        client_stream_read_buffer: &str,
+        client_stream_writer: &mut std::io::BufWriter<&std::net::TcpStream>,
+    ) -> Result<(), failure::Error> {
+        if primary_upstream.is_some() {
+            let primary_upstream_inner = primary_upstream.as_ref().unwrap();
+            let mut primary_upstream_writer = std::io::BufWriter::new(primary_upstream_inner);
+            let mut primary_upstream_reader = std::io::BufReader::new(primary_upstream_inner);
+            let mut primary_upstream_read_buffer = String::with_capacity(1 * 1024 * 1024);
+
+            primary_upstream_writer.write_all(&client_stream_read_buffer.as_bytes())?;
+            primary_upstream_writer.flush()?;
+
+            loop {
+                primary_upstream_reader.read_line(&mut primary_upstream_read_buffer)?;
+                log::debug!("{}", primary_upstream_read_buffer);
+                if primary_upstream_read_buffer.ends_with("END\r\n") {
+                    break;
+                }
+            }
+
+            client_stream_writer.write_all(&primary_upstream_read_buffer.as_bytes())?;
+            client_stream_writer.flush()?;
+        } else if secondary_upstream.is_some() {
+            let secondary_upstream_inner = secondary_upstream.as_ref().unwrap();
+            let mut secondary_upstream_writer = std::io::BufWriter::new(secondary_upstream_inner);
+            let mut secondary_upstream_reader = std::io::BufReader::new(secondary_upstream_inner);
+            let mut secondary_upstream_read_buffer = String::with_capacity(1 * 1024 * 1024);
+
+            secondary_upstream_writer.write_all(&client_stream_read_buffer.as_bytes())?;
+            secondary_upstream_writer.flush()?;
+
+            loop {
+                secondary_upstream_reader.read_line(&mut secondary_upstream_read_buffer)?;
+                log::debug!("{}", secondary_upstream_read_buffer);
+                if secondary_upstream_read_buffer.ends_with("END\r\n") {
+                    break;
+                }
+            }
+
+            client_stream_writer.write_all(&secondary_upstream_read_buffer.as_bytes())?;
+            client_stream_writer.flush()?;
+        } else {
+            unreachable!();
+        }
+
+        Ok(())
+    }
+
+    // Merge responses from upstreams like following example.secondary_upstream_read_buffer
+    //
+    // ```
+    // CONFIG cluster 0 156
+    // 1
+    // mozamimy-cluster-001.qenso7.0001.apne1.cache.amazonaws.com|10.18.5.229|11211 mozamimy-cluster-001.qenso7.0002.apne1.cache.amazonaws.com|10.18.27.74|11211
+    //
+    // END
+    // ```
+    fn handle_config_get_cluster_command(
+        &self,
+        primary_upstream: &Option<std::net::TcpStream>,
+        secondary_upstream: &Option<std::net::TcpStream>,
+        client_stream_read_buffer: &str,
+        client_stream_writer: &mut std::io::BufWriter<&std::net::TcpStream>,
+    ) -> Result<(), failure::Error> {
+        let mut modification_count = 0;
+        let mut clusters_line = String::with_capacity(512);
+        let mut current_line: u8 = 0;
+
+        if primary_upstream.is_some() {
+            let primary_upstream_innner = primary_upstream.as_ref().unwrap();
+            let mut primary_upstream_writer = std::io::BufWriter::new(primary_upstream_innner);
+            let mut primary_upstream_reader = std::io::BufReader::new(primary_upstream_innner);
+            let mut primary_upstream_read_buffer = String::with_capacity(1 * 1024 * 1024);
+
+            primary_upstream_writer.write_all(&client_stream_read_buffer.as_bytes())?;
+            primary_upstream_writer.flush()?;
+
+            loop {
+                primary_upstream_reader.read_line(&mut primary_upstream_read_buffer)?;
+                log::debug!("{}", primary_upstream_read_buffer);
+                if primary_upstream_read_buffer.starts_with("END") {
+                    break;
+                }
+                match current_line {
+                    1 => {
+                        let m: u8 = primary_upstream_read_buffer.trim().parse()?;
+                        modification_count += m;
+                    }
+                    2 => {
+                        clusters_line.push_str(primary_upstream_read_buffer.trim());
+                    }
+                    _ => { /* do nothings */ }
+                }
+                current_line += 1;
+                primary_upstream_read_buffer.clear();
+            }
+
+            clusters_line.push_str(" ");
+        }
+
+        if secondary_upstream.is_some() {
+            let secondary_upstream_inner = secondary_upstream.as_ref().unwrap();
+            let mut secondary_upstream_writer = std::io::BufWriter::new(secondary_upstream_inner);
+            let mut secondary_upstream_reader = std::io::BufReader::new(secondary_upstream_inner);
+            let mut secondary_upstream_read_buffer = String::with_capacity(1 * 1024 * 1024);
+
+            secondary_upstream_writer.write_all(&client_stream_read_buffer.as_bytes())?;
+            secondary_upstream_writer.flush()?;
+            current_line = 0;
+
+            loop {
+                secondary_upstream_reader.read_line(&mut secondary_upstream_read_buffer)?;
+                log::debug!("{}", secondary_upstream_read_buffer);
+                if secondary_upstream_read_buffer.starts_with("END") {
+                    break;
+                }
+                match current_line {
+                    2 => {
+                        clusters_line.push_str(secondary_upstream_read_buffer.trim());
+                    }
+                    _ => { /* do nothings */ }
+                }
+                current_line += 1;
+                secondary_upstream_read_buffer.clear();
+            }
+        }
+
+
+        let mut client_response_body = String::with_capacity(1024);
+        client_response_body.push_str(&modification_count.to_string());
+        client_response_body.push_str("\r\n");
+        client_response_body.push_str(&clusters_line);
+        client_response_body.push_str("\r\n\r\n");
+        client_response_body.push_str("END\r\n");
+        let client_response_body_size = client_response_body.as_bytes().len();
+        let client_response = format!(
+            "CONFIG cluster 0 {}\r\n{}",
+            client_response_body_size, client_response_body
+        );
+        log::debug!("{}", client_response);
+
+        client_stream_writer.write_all(client_response.as_bytes())?;
+        client_stream_writer.flush()?;
+        Ok(())
     }
 }
 
