@@ -110,11 +110,11 @@ workflows:
               ignore: '/.*/'
             tags:
               only: '/^v\d+\.\d+\.\d+/'
-      - publish_crate:
-          requires:
-            - 'test'
-          filters:
-            branches:
-              ignore: '/.*/'
-            tags:
-              only: '/^v\d+\.\d+\.\d+/'
+      # - publish_crate:
+      #     requires:
+      #       - 'test'
+      #     filters:
+      #       branches:
+      #         ignore: '/.*/'
+      #       tags:
+      #         only: '/^v\d+\.\d+\.\d+/'
