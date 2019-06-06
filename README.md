@@ -1,5 +1,7 @@
 # Mimikyu
 
+[![CircleCI](https://circleci.com/gh/mozamimy/mimikyu.svg?style=svg)](https://circleci.com/gh/mozamimy/mimikyu)
+
 Mimikyu is a tiny proxy of ElastiCahce Memceched configuration endpoint designed for safe migration between 2 Memcached clusters.
 
 This implementation is very rough. Please test carefully with your Memcached client before use in production.
