@@ -51,10 +51,8 @@ impl Server {
                 }
             });
         }
-
         Ok(())
     }
-
 }
 
 impl ServerInner {
@@ -293,7 +291,6 @@ impl ServerInner {
                 secondary_upstream_read_buffer.clear();
             }
         }
-
 
         let mut client_response_body = String::with_capacity(1024);
         client_response_body.push_str(&modification_count.to_string());
