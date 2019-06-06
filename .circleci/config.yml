@@ -1,0 +1,120 @@
+version: 2.1
+
+executors:
+  default:
+    docker:
+      - image: 'rust:1.35-stretch'
+    environment:
+      BUILD_JOBS: '4'
+  docker:
+    docker:
+      - image: 'docker:18.09'
+
+jobs:
+  lint:
+    executor: 'default'
+    steps:
+      - 'checkout'
+      - run: 'rustup component add rustfmt'
+      - run: 'cargo fmt -- --check'
+  build:
+    executor: 'default'
+    parameters:
+      release:
+        type: 'boolean'
+        default: false
+    steps:
+      - 'checkout'
+      - restore_cache:
+          key: 'v1-cargo-lock-{{ checksum "Cargo.lock"}}<<# parameters.release >>-release<</ parameters.release>>'
+      - run: 'cargo build --jobs ${BUILD_JOBS} <<# parameters.release >>--release --locked<</ parameters.release>>'
+      - save_cache:
+          key: 'v1-cargo-lock-{{ checksum "Cargo.lock"}}<<# parameters.release >>-release<</ parameters.release>>'
+          paths:
+            - '/usr/local/cargo/registry'
+            - 'target/'
+  test:
+    executor: 'default'
+    parameters:
+      release:
+        type: 'boolean'
+        default: false
+    steps:
+      - 'checkout'
+      - restore_cache:
+          key: 'v1-cargo-lock-{{ checksum "Cargo.lock"}}<<# parameters.release >>-release<</ parameters.release>>'
+      - run: 'cargo test <<# parameters.release >>--release --locked<</ parameters.release>>'
+  build_and_push_docker_image:
+    executor: 'docker'
+    environment:
+      DOCKER_USER: 'mozamimy'
+    steps:
+      - 'checkout'
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run: 'docker build --tag mozamimy/mimikyu:latest --tag mozamimy/mimikyu:${CIRCLE_TAG:1} --tag mozamimy/mimikyu:${CIRCLE_SHA1} .'
+      - run: 'docker login -u ${DOCKER_USER} -p ${DOCKER_PASSWORD}'
+      - run: 'docker push mozamimy/mimikyu:latest'
+      - run: 'docker push mozamimy/mimikyu:${CIRCLE_TAG:1}'
+      - run: 'docker push mozamimy/mimikyu:${CIRCLE_SHA1}'
+  publish_crate:
+    executor: 'default'
+    steps:
+      - 'checkout'
+      - restore_cache:
+          key: 'v1-cargo-lock-{{ checksum "Cargo.lock"}}-release'
+      - run: 'cargo login ${CRATES_IO_API_TOKEN}'
+      - run: 'cargo package --jobs ${BUILD_JOBS} --locked'
+      - run: 'cargo publish --jobs ${BUILD_JOBS} --locked'
+
+workflows:
+  version: 2
+  # This workflow is invoked in all branches.
+  run_test:
+    jobs:
+      - 'lint'
+      - 'build'
+      - test:
+          requires:
+            - 'lint'
+            - 'build'
+  # This workflow is invoked when a vX.Y.Z tag is pushed.
+  release:
+    jobs:
+      - lint:
+          filters:
+            branches:
+              ignore: '/.*/'
+            tags:
+              only: '/^v\d+\.\d+\.\d+/'
+      - build:
+          release: true
+          filters:
+            branches:
+              ignore: '/.*/'
+            tags:
+              only: '/^v\d+\.\d+\.\d+/'
+      - test:
+          release: true
+          requires:
+            - 'lint'
+            - 'build'
+          filters:
+            tags:
+              only: '/^v\d+\.\d+\.\d+/'
+      - build_and_push_docker_image:
+          requires:
+            - 'test'
+          filters:
+            branches:
+              ignore: '/.*/'
+            tags:
+              only: '/^v\d+\.\d+\.\d+/'
+      - publish_crate:
+          requires:
+            - 'test'
+          filters:
+            branches:
+              ignore: '/.*/'
+            tags:
+              only: '/^v\d+\.\d+\.\d+/'
